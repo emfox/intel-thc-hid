@@ -1045,8 +1045,9 @@ int thc_dma_write(struct thc_device *dev, void *buffer, size_t buf_len)
 
 	dma_set_start_bit(dev, &dev->dma_ctx->dma_config[THC_TXDMA]);
 
-	ret = wait_event_interruptible_timeout(dev->write_complete_wait, dev->write_done, 1 * HZ);
-	if (ret <= 0 || !dev->write_done) {
+	ret = wait_event_timeout(dev->write_complete_wait,
+				 dev->write_done, 1 * HZ);
+	if (!ret || !dev->write_done) {
 		dev_err_once(dev->dev, "timeout for waiting TxDMA completion\n");
 		ret = -ETIMEDOUT;
 		goto end;
@@ -1059,8 +1060,8 @@ int thc_dma_write(struct thc_device *dev, void *buffer, size_t buf_len)
 end:
 	mutex_unlock(&dev->thc_bus_lock);
 
-	if (restore_interrupts)
-		ret = thc_interrupt_quiesce(dev, false);
+	if (restore_interrupts && thc_interrupt_quiesce(dev, false))
+		dev_err(dev->dev, "failed to restore interrupts after TxDMA write\n");
 
 	return ret;
 }
