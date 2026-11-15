@@ -297,20 +297,20 @@ static void release_dma_buffers(struct thc_device *dev,
 		return;
 
 	for (i = 0; i < config->prd_tbl_num; i++) {
-		if (!config->sgls[i] || !config->sgls_nent[i])
+		if (!config->sgls[i])
 			continue;
 
-		dma_unmap_sg(dev->dev, config->sgls[i],
-			     config->sgls_nent_pages[i],
-			     config->dir);
+		if (config->sgls_nent[i])
+			dma_unmap_sg(dev->dev, config->sgls[i],
+				     config->sgls_nent_pages[i],
+				     config->dir);
 
 		sgl_free(config->sgls[i]);
 		config->sgls[i] = NULL;
 	}
 
-	memset(config->prd_tbls, 0, prd_tbls_size);
-
 	if (config->prd_tbls) {
+		memset(config->prd_tbls, 0, prd_tbls_size);
 		dma_free_coherent(dev->dev, prd_tbls_size, config->prd_tbls,
 				  config->prd_tbls_dma_handle);
 		config->prd_tbls = NULL;
@@ -425,8 +425,7 @@ int thc_dma_allocate(struct thc_device *dev)
 	return 0;
 
 release_bufs:
-	while (chan--)
-		release_dma_buffers(dev, &dev->dma_ctx->dma_config[chan]);
+	thc_dma_release(dev);
 
 	return ret;
 }
