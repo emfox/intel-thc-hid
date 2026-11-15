@@ -20,6 +20,11 @@
 #define THC_DEFAULT_RXDMA_POLLING_US_TIMEOUT  (10 * USEC_PER_MSEC)
 
 /*
+ * 235 ms for a 64 KB frame at the slowest gear, so this covers a whole one.
+ */
+#define THC_RXDMA_DRAIN_US_TIMEOUT  (500 * USEC_PER_MSEC)
+
+/*
  * THC needs 1KB aligned address, dest_addr is 54 bits, not 64,
  * so don't need to send the lower 10-bits of address.
  */

@@ -536,7 +536,9 @@ void thc_dma_unconfigure(struct thc_device *dev)
 }
 EXPORT_SYMBOL_NS_GPL(thc_dma_unconfigure, "INTEL_THC");
 
-static int thc_wait_for_dma_pause(struct thc_device *dev, enum thc_dma_channel channel)
+static int thc_wait_for_dma_pause(struct thc_device *dev,
+				  enum thc_dma_channel channel,
+				  u32 timeout_us)
 {
 	u32 ctrl_reg, sts_reg, sts;
 	int ret;
@@ -554,7 +556,7 @@ static int thc_wait_for_dma_pause(struct thc_device *dev, enum thc_dma_channel c
 	ret = regmap_read_poll_timeout(dev->thc_regmap, sts_reg, sts,
 				       !(sts & THC_M_PRT_READ_DMA_INT_STS_ACTIVE),
 				       THC_DEFAULT_RXDMA_POLLING_US_INTERVAL,
-				       THC_DEFAULT_RXDMA_POLLING_US_TIMEOUT);
+				       timeout_us);
 
 	if (ret) {
 		dev_err_once(dev->dev,
@@ -588,13 +590,15 @@ int thc_rxdma_reset(struct thc_device *dev)
 		goto end;
 	}
 
-	ret = thc_wait_for_dma_pause(dev, THC_RXDMA1);
+	ret = thc_wait_for_dma_pause(dev, THC_RXDMA1,
+				     THC_RXDMA_DRAIN_US_TIMEOUT);
 	if (ret) {
 		dev_err(dev->dev, "Wait for RxDMA1 pause failed during RxDMA reset\n");
 		goto end;
 	}
 
-	ret = thc_wait_for_dma_pause(dev, THC_RXDMA2);
+	ret = thc_wait_for_dma_pause(dev, THC_RXDMA2,
+				     THC_RXDMA_DRAIN_US_TIMEOUT);
 	if (ret) {
 		dev_err(dev->dev, "Wait for RxDMA2 pause failed during RxDMA reset\n");
 		goto end;
@@ -769,7 +773,10 @@ static int thc_swdma_read_start(struct thc_device *dev, void *write_buff,
 	if (ret)
 		return ret;
 
-	if (thc_wait_for_dma_pause(dev, THC_RXDMA1) || thc_wait_for_dma_pause(dev, THC_RXDMA2))
+	if (thc_wait_for_dma_pause(dev, THC_RXDMA1,
+				   THC_DEFAULT_RXDMA_POLLING_US_TIMEOUT) ||
+	    thc_wait_for_dma_pause(dev, THC_RXDMA2,
+				   THC_DEFAULT_RXDMA_POLLING_US_TIMEOUT))
 		return -EIO;
 
 	thc_reset_dma_settings(dev);
@@ -834,7 +841,8 @@ static int thc_swdma_read_completion(struct thc_device *dev)
 {
 	int ret;
 
-	ret = thc_wait_for_dma_pause(dev, THC_SWDMA);
+	ret = thc_wait_for_dma_pause(dev, THC_SWDMA,
+				     THC_DEFAULT_RXDMA_POLLING_US_TIMEOUT);
 	if (ret)
 		return ret;
 
