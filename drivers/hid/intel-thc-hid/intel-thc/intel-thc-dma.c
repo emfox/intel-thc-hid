@@ -94,6 +94,18 @@ static void dma_set_start_bit(struct thc_device *dev,
 	}
 }
 
+static void thc_clear_start_bits(struct thc_device *dev)
+{
+	regmap_write_bits(dev->thc_regmap, THC_M_PRT_READ_DMA_CNTRL_1_OFFSET,
+			  THC_M_PRT_READ_DMA_CNTRL_START, 0);
+	regmap_write_bits(dev->thc_regmap, THC_M_PRT_READ_DMA_CNTRL_2_OFFSET,
+			  THC_M_PRT_READ_DMA_CNTRL_START, 0);
+	regmap_write_bits(dev->thc_regmap, THC_M_PRT_READ_DMA_CNTRL_SW_OFFSET,
+			  THC_M_PRT_READ_DMA_CNTRL_START, 0);
+	regmap_write_bits(dev->thc_regmap, THC_M_PRT_WRITE_DMA_CNTRL_OFFSET,
+			  THC_M_PRT_WRITE_DMA_CNTRL_THC_WRDMA_START, 0);
+}
+
 static void dma_set_prd_control(struct thc_device *dev, u8 entry_count, u8 cb_depth,
 				struct thc_dma_configuration *dma_config)
 {
@@ -267,14 +279,7 @@ static int setup_dma_buffers(struct thc_device *dev,
 static void thc_reset_dma_settings(struct thc_device *dev)
 {
 	/* Stop all DMA channels and reset DMA read pointers */
-	regmap_write_bits(dev->thc_regmap, THC_M_PRT_READ_DMA_CNTRL_1_OFFSET,
-			  THC_M_PRT_READ_DMA_CNTRL_START, 0);
-	regmap_write_bits(dev->thc_regmap, THC_M_PRT_READ_DMA_CNTRL_2_OFFSET,
-			  THC_M_PRT_READ_DMA_CNTRL_START, 0);
-	regmap_write_bits(dev->thc_regmap, THC_M_PRT_READ_DMA_CNTRL_SW_OFFSET,
-			  THC_M_PRT_READ_DMA_CNTRL_START, 0);
-	regmap_write_bits(dev->thc_regmap, THC_M_PRT_WRITE_DMA_CNTRL_OFFSET,
-			  THC_M_PRT_WRITE_DMA_CNTRL_THC_WRDMA_START, 0);
+	thc_clear_start_bits(dev);
 
 	regmap_write_bits(dev->thc_regmap, THC_M_PRT_READ_DMA_CNTRL_1_OFFSET,
 			  THC_M_PRT_READ_DMA_CNTRL_TPCPR,
@@ -518,16 +523,16 @@ void thc_dma_unconfigure(struct thc_device *dev)
 {
 	int chan;
 
+	/*
+	 * Stop the engines first: one that is running keeps writing through
+	 * a table whose base is already gone.
+	 */
+	thc_clear_start_bits(dev);
+
 	for (chan = 0; chan < MAX_THC_DMA_CHANNEL; chan++) {
 		dma_set_prd_base_addr(dev, 0, &dev->dma_ctx->dma_config[chan]);
 		dma_clear_prd_control(dev, &dev->dma_ctx->dma_config[chan]);
 	}
-
-	regmap_write_bits(dev->thc_regmap, THC_M_PRT_READ_DMA_CNTRL_1_OFFSET,
-			  THC_M_PRT_READ_DMA_CNTRL_START, 0);
-
-	regmap_write_bits(dev->thc_regmap, THC_M_PRT_READ_DMA_CNTRL_2_OFFSET,
-			  THC_M_PRT_READ_DMA_CNTRL_START, 0);
 }
 EXPORT_SYMBOL_NS_GPL(thc_dma_unconfigure, "INTEL_THC");
 
