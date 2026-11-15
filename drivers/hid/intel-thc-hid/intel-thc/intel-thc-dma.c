@@ -514,6 +514,10 @@ int thc_dma_configure(struct thc_device *dev)
 }
 EXPORT_SYMBOL_NS_GPL(thc_dma_configure, "INTEL_THC");
 
+static int thc_wait_for_dma_pause(struct thc_device *dev,
+				  enum thc_dma_channel channel,
+				  u32 timeout_us);
+
 /**
  * thc_dma_unconfigure - Unconfigure DMA settings for all DMA engines
  *
@@ -525,9 +529,14 @@ void thc_dma_unconfigure(struct thc_device *dev)
 
 	/*
 	 * Stop the engines first: one that is running keeps writing through
-	 * a table whose base is already gone.
+	 * a table whose base is already gone. The start bit is only a
+	 * request, so let each engine drain the frame it has in flight
+	 * before the table it writes into goes away.
 	 */
 	thc_clear_start_bits(dev);
+	for (chan = 0; chan < MAX_THC_DMA_CHANNEL; chan++)
+		thc_wait_for_dma_pause(dev, (enum thc_dma_channel)chan,
+				       THC_DMA_DRAIN_US_TIMEOUT);
 
 	for (chan = 0; chan < MAX_THC_DMA_CHANNEL; chan++) {
 		dma_set_prd_base_addr(dev, 0, &dev->dma_ctx->dma_config[chan]);
@@ -536,25 +545,48 @@ void thc_dma_unconfigure(struct thc_device *dev)
 }
 EXPORT_SYMBOL_NS_GPL(thc_dma_unconfigure, "INTEL_THC");
 
-static int thc_wait_for_dma_pause(struct thc_device *dev, enum thc_dma_channel channel)
+static int thc_wait_for_dma_pause(struct thc_device *dev,
+				  enum thc_dma_channel channel,
+				  u32 timeout_us)
 {
-	u32 ctrl_reg, sts_reg, sts;
+	u32 ctrl_reg, ctrl_bit, sts_reg, sts_bit, sts;
 	int ret;
 
-	ctrl_reg = (channel == THC_RXDMA1) ? THC_M_PRT_READ_DMA_CNTRL_1_OFFSET :
-			((channel == THC_RXDMA2) ? THC_M_PRT_READ_DMA_CNTRL_2_OFFSET :
-						   THC_M_PRT_READ_DMA_CNTRL_SW_OFFSET);
+	switch (channel) {
+	case THC_RXDMA1:
+		ctrl_reg = THC_M_PRT_READ_DMA_CNTRL_1_OFFSET;
+		sts_reg = THC_M_PRT_READ_DMA_INT_STS_1_OFFSET;
+		ctrl_bit = THC_M_PRT_READ_DMA_CNTRL_START;
+		sts_bit = THC_M_PRT_READ_DMA_INT_STS_ACTIVE;
+		break;
+	case THC_RXDMA2:
+		ctrl_reg = THC_M_PRT_READ_DMA_CNTRL_2_OFFSET;
+		sts_reg = THC_M_PRT_READ_DMA_INT_STS_2_OFFSET;
+		ctrl_bit = THC_M_PRT_READ_DMA_CNTRL_START;
+		sts_bit = THC_M_PRT_READ_DMA_INT_STS_ACTIVE;
+		break;
+	case THC_SWDMA:
+		ctrl_reg = THC_M_PRT_READ_DMA_CNTRL_SW_OFFSET;
+		sts_reg = THC_M_PRT_READ_DMA_INT_STS_SW_OFFSET;
+		ctrl_bit = THC_M_PRT_READ_DMA_CNTRL_START;
+		sts_bit = THC_M_PRT_READ_DMA_INT_STS_ACTIVE;
+		break;
+	case THC_TXDMA:
+		ctrl_reg = THC_M_PRT_WRITE_DMA_CNTRL_OFFSET;
+		sts_reg = THC_M_PRT_WRITE_INT_STS_OFFSET;
+		ctrl_bit = THC_M_PRT_WRITE_DMA_CNTRL_THC_WRDMA_START;
+		sts_bit = THC_M_PRT_WRITE_INT_STS_THC_WRDMA_ACTIVE;
+		break;
+	default:
+		return -EINVAL;
+	}
 
-	regmap_write_bits(dev->thc_regmap, ctrl_reg, THC_M_PRT_READ_DMA_CNTRL_START, 0);
-
-	sts_reg = (channel == THC_RXDMA1) ? THC_M_PRT_READ_DMA_INT_STS_1_OFFSET :
-			((channel == THC_RXDMA2) ? THC_M_PRT_READ_DMA_INT_STS_2_OFFSET :
-						   THC_M_PRT_READ_DMA_INT_STS_SW_OFFSET);
+	regmap_write_bits(dev->thc_regmap, ctrl_reg, ctrl_bit, 0);
 
 	ret = regmap_read_poll_timeout(dev->thc_regmap, sts_reg, sts,
-				       !(sts & THC_M_PRT_READ_DMA_INT_STS_ACTIVE),
+				       !(sts & sts_bit),
 				       THC_DEFAULT_RXDMA_POLLING_US_INTERVAL,
-				       THC_DEFAULT_RXDMA_POLLING_US_TIMEOUT);
+				       timeout_us);
 
 	if (ret) {
 		dev_err_once(dev->dev,
@@ -588,13 +620,15 @@ int thc_rxdma_reset(struct thc_device *dev)
 		goto end;
 	}
 
-	ret = thc_wait_for_dma_pause(dev, THC_RXDMA1);
+	ret = thc_wait_for_dma_pause(dev, THC_RXDMA1,
+				     THC_DMA_DRAIN_US_TIMEOUT);
 	if (ret) {
 		dev_err(dev->dev, "Wait for RxDMA1 pause failed during RxDMA reset\n");
 		goto end;
 	}
 
-	ret = thc_wait_for_dma_pause(dev, THC_RXDMA2);
+	ret = thc_wait_for_dma_pause(dev, THC_RXDMA2,
+				     THC_DMA_DRAIN_US_TIMEOUT);
 	if (ret) {
 		dev_err(dev->dev, "Wait for RxDMA2 pause failed during RxDMA reset\n");
 		goto end;
@@ -769,7 +803,10 @@ static int thc_swdma_read_start(struct thc_device *dev, void *write_buff,
 	if (ret)
 		return ret;
 
-	if (thc_wait_for_dma_pause(dev, THC_RXDMA1) || thc_wait_for_dma_pause(dev, THC_RXDMA2))
+	if (thc_wait_for_dma_pause(dev, THC_RXDMA1,
+				   THC_DEFAULT_RXDMA_POLLING_US_TIMEOUT) ||
+	    thc_wait_for_dma_pause(dev, THC_RXDMA2,
+				   THC_DEFAULT_RXDMA_POLLING_US_TIMEOUT))
 		return -EIO;
 
 	thc_reset_dma_settings(dev);
@@ -834,7 +871,8 @@ static int thc_swdma_read_completion(struct thc_device *dev)
 {
 	int ret;
 
-	ret = thc_wait_for_dma_pause(dev, THC_SWDMA);
+	ret = thc_wait_for_dma_pause(dev, THC_SWDMA,
+				     THC_DEFAULT_RXDMA_POLLING_US_TIMEOUT);
 	if (ret)
 		return ret;
 
