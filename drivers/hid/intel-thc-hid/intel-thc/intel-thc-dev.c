@@ -990,7 +990,7 @@ int thc_interrupt_handler(struct thc_device *dev)
 			     THC_M_PRT_WRITE_INT_STS_OFFSET, write_sts);
 
 		dev->write_done = true;
-		wake_up_interruptible(&dev->write_complete_wait);
+		wake_up(&dev->write_complete_wait);
 
 		interrupt_type |= BIT(THC_TXDMA_INT);
 	}
