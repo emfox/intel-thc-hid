@@ -7,7 +7,9 @@
 #include <linux/build_bug.h>
 #include <linux/device.h>
 #include <linux/interrupt.h>
+#include <linux/sched.h>
 #include <linux/types.h>
+#include <linux/wait.h>
 
 #include "intel-thc-dev.h"
 
@@ -95,23 +97,47 @@ static_assert(offsetof(struct thc_ipts_cfg, vendor) == 0x1c);
  * struct thc_ipts - state of one THC port in IPTS mode
  * @dev: device used for resources and logging
  * @thc: shared THC core context
+ * @irq: interrupt line of the port
  * @cfg: configuration block last read from the controller
  * @vendor: vendor ID the controller reports for its HID device
  * @product: product ID the controller reports for its HID device
  * @max_rx: largest frame the controller may send, in bytes
  * @max_tx: largest frame the driver may send, in bytes
+ * @buf_rx: allocated size of @rx_frame
+ * @rx_frame: buffer for one received frame, including its header
+ * @recover_work: resets the receive engine after a transfer error
  * @running: the controller answered and is out of reset
+ * @dma_ready: DMA engines are configured and may be used
+ * @recover_pending: a reset is wanted, refuse new requests
+ * @recovering: a reset is queued or running, ignore the interrupt
+ * @recover_seq: number of resets that ran, to tell a dropped answer apart
+ * @stopping: the port is being torn down, ignore the interrupt
+ * @irq_thread: thread the port interrupt is handled in, once it has run
  */
 struct thc_ipts {
 	struct device		*dev;
 	struct thc_device	*thc;
+	int			irq;
 	struct thc_ipts_cfg	cfg;
 	u16			vendor;
 	u16			product;
 	size_t			max_rx;
 	size_t			max_tx;
+	size_t			buf_rx;
+	u8			*rx_frame;
+	struct work_struct	recover_work;
 	bool			running;
+	bool			dma_ready;
+	bool			recover_pending;
+	bool			recovering;
+	unsigned int		recover_seq;
+	bool			stopping;
+	struct task_struct	*irq_thread;
 };
+
+irqreturn_t thc_ipts_hardirq(int irq, void *data);
+irqreturn_t thc_ipts_thread(int irq, void *data);
+void thc_ipts_recover(struct work_struct *work);
 
 int thc_ipts_port_start(struct thc_ipts *idev);
 void thc_ipts_port_stop(struct thc_ipts *idev);
