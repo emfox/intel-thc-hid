@@ -6,6 +6,7 @@
 
 #include <linux/bits.h>
 #include <linux/dma-mapping.h>
+#include <linux/mutex.h>
 #include <linux/sizes.h>
 #include <linux/time64.h>
 #include <linux/types.h>
@@ -95,6 +96,7 @@ struct thc_prd_table {
  * @dma_channel: DMA channel for current DMA configuration
  * @prd_tbls_dma_handle: DMA buffer handle
  * @dir: Direction of DMA for this config
+ * @is_started: The engine is running, so the ring may be read
  * @prd_tbls: PRD tables for current DMA
  * @sgls: Array of pointers to scatter-gather lists
  * @sgls_nent_pages: Number of pages per scatter-gather list
@@ -111,6 +113,7 @@ struct thc_dma_configuration {
 	dma_addr_t prd_tbls_dma_handle;
 	enum dma_data_direction dir;
 	bool is_enabled;
+	bool is_started;
 
 	struct thc_prd_table *prd_tbls;
 	struct scatterlist *sgls[PRD_TABLES_NUM];
@@ -129,6 +132,8 @@ struct thc_dma_configuration {
  * struct thc_dma_context - THC DMA context
  * @thc_dma_configuration: Array of all THC Channel configures
  * @use_write_interrupts: Indicate TxDMA using interrupt or polling
+ * @prd_lock: Keeps the DMA read path off the tables while they are
+ *            rebuilt, armed, stopped or released
  * @rx_max_size_en: Temp flag to indicate THC I2C Rx max input size control feature
  *                  enabled or not, only be used during SWDMA operation.
  * @rx_int_delay_en: Temp flag to indicate THC I2C Rx interrupt delay feature
@@ -137,6 +142,9 @@ struct thc_dma_configuration {
 struct thc_dma_context {
 	struct thc_dma_configuration dma_config[MAX_THC_DMA_CHANNEL];
 	u8 use_write_interrupts;
+
+	/* Taken inside the bus lock, never the other way round. */
+	struct mutex prd_lock;
 
 	bool rx_max_size_en;
 	bool rx_int_delay_en;
