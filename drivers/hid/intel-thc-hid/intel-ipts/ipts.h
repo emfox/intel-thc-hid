@@ -6,8 +6,11 @@
 #include <linux/bits.h>
 #include <linux/build_bug.h>
 #include <linux/device.h>
+#include <linux/hid.h>
 #include <linux/interrupt.h>
+#include <linux/mutex.h>
 #include <linux/sched.h>
+#include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/wait.h>
 
@@ -39,6 +42,13 @@
 /* The block fills in while the controller starts, so $TIC is retried. */
 #define THC_IPTS_CFG_TRIES		10
 #define THC_IPTS_CFG_RETRY_MS		100
+
+/* A report descriptor arrives with eight bytes of preamble in front of it. */
+#define THC_IPTS_DESC_PREAMBLE	8
+
+/* Retry budget for the report descriptor handshake. */
+#define THC_IPTS_REQ_TRIES		6
+#define THC_IPTS_REQ_TIMEOUT_MS	300
 
 #define THC_IPTS_CFG_KNOWN		40
 
@@ -91,6 +101,17 @@ static_assert(offsetof(struct thc_ipts_cfg, vendor) == 0x1c);
 #define THC_IPTS_RX_HDR_SIZE		64
 #define THC_IPTS_TX_HDR_SIZE		8
 
+/* Frame codes. The same numbers mean different things per direction. */
+#define THC_IPTS_RX_INPUT		3
+#define THC_IPTS_RX_FEATURE		4
+#define THC_IPTS_RX_DESC		5
+#define THC_IPTS_RX_RESET		7
+
+#define THC_IPTS_TX_SET_FEATURE	3
+#define THC_IPTS_TX_GET_FEATURE	4
+#define THC_IPTS_TX_OUTPUT		5
+#define THC_IPTS_TX_GET_DESC		7
+
 /**
  * enum thc_ipts_state - how far the port has been brought up
  * @THC_IPTS_DOWN: no controller, no buffers, no HID device
@@ -122,7 +143,25 @@ enum thc_ipts_state {
  * @max_rx: largest frame the controller may send, in bytes
  * @max_tx: largest frame the driver may send, in bytes
  * @buf_rx: allocated size of @rx_frame
+ * @buf_tx: allocated size of @tx_frame
+ * @buf_desc: allocated size of @desc
+ * @buf_feat: allocated size of @feature
  * @rx_frame: buffer for one received frame, including its header
+ * @tx_frame: buffer for one frame to send, including its header
+ * @desc: copy of the report descriptor, past its preamble
+ * @desc_len: length of @desc
+ * @have_desc: a descriptor arrived and has not been consumed yet
+ * @feature: buffer a feature report is collected in
+ * @feature_len: length of the report in @feature
+ * @feature_id: report ID that was asked for, checked against the answer
+ * @feature_pending: a feature report was asked for and has not arrived yet
+ * @feature_done: a feature report arrived and has not been consumed yet
+ * @feature_off: a request timed out and no more are taken until the port
+ *	restarts
+ * @feature_lock: protects the feature report buffer and its flags
+ * @wq: waited on for a report descriptor or a feature report
+ * @tx_lock: serialises writes into @tx_frame
+ * @hid: HID device the reports are handed to, once it has been registered
  * @recover_work: resets the receive engine after a transfer error
  * @state: how far the port has been brought up, see enum thc_ipts_state
  * @recover_pending: a reset is wanted, refuse new requests
@@ -141,7 +180,24 @@ struct thc_ipts {
 	size_t			max_rx;
 	size_t			max_tx;
 	size_t			buf_rx;
+	size_t			buf_tx;
+	size_t			buf_desc;
+	size_t			buf_feat;
 	u8			*rx_frame;
+	u8			*tx_frame;
+	u8			*desc;
+	size_t			desc_len;
+	bool			have_desc;
+	u8			*feature;
+	size_t			feature_len;
+	u8			feature_id;
+	bool			feature_pending;
+	bool			feature_done;
+	bool			feature_off;
+	struct mutex		feature_lock;	/* feature report handshake */
+	wait_queue_head_t	wq;
+	struct mutex		tx_lock;	/* transmit frame */
+	struct hid_device	*hid;
 	struct work_struct	recover_work;
 	enum thc_ipts_state	state;
 	bool			recover_pending;
