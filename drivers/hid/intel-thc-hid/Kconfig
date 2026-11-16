@@ -40,4 +40,18 @@ config INTEL_QUICKI2C
 
 	  Say Y/M here if you want to support Intel QuickI2C. If unsure, say N.
 
+config INTEL_IPTS
+	tristate "Intel Touch Host Controller IPTS mode"
+	depends on INTEL_THC_HID
+	help
+	  Support for THC ports in IPTS mode. Instead of HIDSPI these ports
+	  drive the touch controller over plain SPI and carry its reports in a
+	  private framing. This driver brings such a port up, reads the
+	  controller's configuration block and exposes the reports as a HID
+	  device, so that a decoder in user space can turn them into input
+	  events.
+
+	  Say Y/M here if you have an Intel touch controller that runs in IPTS
+	  mode. If unsure, say N.
+
 endmenu
