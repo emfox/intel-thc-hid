@@ -30,9 +30,19 @@ static void dma_set_start_bit(struct thc_device *dev,
 			      struct thc_dma_configuration *dma_config)
 {
 	u32 ctrl, mask, mbits, data, offset;
+	bool reads_ring;
 
 	if (!dma_config->is_enabled)
 		return;
+
+	/*
+	 * Arm and publish under the lock the read path takes: a ring that was
+	 * just rewound still reads as non-empty, so a reader in between would
+	 * copy an entry the engine never wrote. TxDMA reads no ring.
+	 */
+	reads_ring = dma_config->dma_channel != THC_TXDMA;
+	if (reads_ring)
+		mutex_lock(&dev->dma_ctx->prd_lock);
 
 	switch (dma_config->dma_channel) {
 	case THC_RXDMA1:
@@ -91,6 +101,17 @@ static void dma_set_start_bit(struct thc_device *dev,
 
 	default:
 		break;
+	}
+
+	if (reads_ring) {
+		/*
+		 * The mutex orders the flag, not the write to the device:
+		 * read the register back so the arming lands first.
+		 */
+		regmap_read(dev->thc_regmap, dma_config->dma_cntrl, &ctrl);
+
+		WRITE_ONCE(dma_config->is_started, true);
+		mutex_unlock(&dev->dma_ctx->prd_lock);
 	}
 }
 
@@ -211,10 +232,25 @@ static void thc_copy_sgls_to_prd(struct thc_device *dev,
 {
 	unsigned int i;
 
+	guard(mutex)(&dev->dma_ctx->prd_lock);
+
+	if (!config->is_enabled || !config->prd_tbls)
+		return;
+
 	memset(config->prd_tbls, 0, array_size(PRD_TABLE_SIZE, config->prd_tbl_num));
 
 	for (i = 0; i < config->prd_tbl_num; i++)
 		thc_copy_one_sgl_to_prd(dev, config, i);
+}
+
+/*
+ * A frame that is never read leaves its entry short, and the engine reads
+ * the table again on every start: put the capacity back.
+ */
+static void thc_rebuild_rx_prd(struct thc_device *dev)
+{
+	thc_copy_sgls_to_prd(dev, &dev->dma_ctx->dma_config[THC_RXDMA1]);
+	thc_copy_sgls_to_prd(dev, &dev->dma_ctx->dma_config[THC_RXDMA2]);
 }
 
 static int setup_dma_buffers(struct thc_device *dev,
@@ -266,6 +302,15 @@ static int setup_dma_buffers(struct thc_device *dev,
 
 static void thc_reset_dma_settings(struct thc_device *dev)
 {
+	struct thc_dma_context *dma_ctx = dev->dma_ctx;
+	int chan;
+
+	guard(mutex)(&dma_ctx->prd_lock);
+
+	/* The rewind below discards the queue, so no read may start. */
+	for (chan = 0; chan < MAX_THC_DMA_CHANNEL; chan++)
+		WRITE_ONCE(dma_ctx->dma_config[chan].is_started, false);
+
 	/* Stop all DMA channels and reset DMA read pointers */
 	regmap_write_bits(dev->thc_regmap, THC_M_PRT_READ_DMA_CNTRL_1_OFFSET,
 			  THC_M_PRT_READ_DMA_CNTRL_START, 0);
@@ -327,6 +372,7 @@ struct thc_dma_context *thc_dma_init(struct thc_device *dev)
 		return NULL;
 
 	dev->dma_ctx = dma_ctx;
+	mutex_init(&dma_ctx->prd_lock);
 
 	dma_ctx->dma_config[THC_RXDMA1].dma_channel = THC_RXDMA1;
 	dma_ctx->dma_config[THC_RXDMA2].dma_channel = THC_RXDMA2;
@@ -441,6 +487,8 @@ void thc_dma_release(struct thc_device *dev)
 {
 	int chan;
 
+	guard(mutex)(&dev->dma_ctx->prd_lock);
+
 	for (chan = 0; chan < MAX_THC_DMA_CHANNEL; chan++)
 		release_dma_buffers(dev, &dev->dma_ctx->dma_config[chan]);
 }
@@ -484,12 +532,14 @@ int thc_dma_configure(struct thc_device *dev)
 	struct thc_dma_context *dma_ctx = dev->dma_ctx;
 	int chan;
 
-	thc_reset_dma_settings(dev);
-
 	if (!dma_ctx) {
 		dev_err_once(dev->dev, "Cannot do DMA configure because DMA context is NULL\n");
 		return -EINVAL;
 	}
+
+	thc_reset_dma_settings(dev);
+
+	thc_rebuild_rx_prd(dev);
 
 	for (chan = 0; chan < MAX_THC_DMA_CHANNEL; chan++) {
 		dma_set_prd_base_addr(dev,
@@ -519,7 +569,10 @@ void thc_dma_unconfigure(struct thc_device *dev)
 {
 	int chan;
 
+	guard(mutex)(&dev->dma_ctx->prd_lock);
+
 	for (chan = 0; chan < MAX_THC_DMA_CHANNEL; chan++) {
+		WRITE_ONCE(dev->dma_ctx->dma_config[chan].is_started, false);
 		dma_set_prd_base_addr(dev, 0, &dev->dma_ctx->dma_config[chan]);
 		dma_clear_prd_control(dev, &dev->dma_ctx->dma_config[chan]);
 	}
@@ -541,7 +594,13 @@ static int thc_wait_for_dma_pause(struct thc_device *dev, enum thc_dma_channel c
 			((channel == THC_RXDMA2) ? THC_M_PRT_READ_DMA_CNTRL_2_OFFSET :
 						   THC_M_PRT_READ_DMA_CNTRL_SW_OFFSET);
 
-	regmap_write_bits(dev->thc_regmap, ctrl_reg, THC_M_PRT_READ_DMA_CNTRL_START, 0);
+	{
+		guard(mutex)(&dev->dma_ctx->prd_lock);
+
+		WRITE_ONCE(dev->dma_ctx->dma_config[channel].is_started, false);
+		regmap_write_bits(dev->thc_regmap, ctrl_reg,
+				  THC_M_PRT_READ_DMA_CNTRL_START, 0);
+	}
 
 	sts_reg = (channel == THC_RXDMA1) ? THC_M_PRT_READ_DMA_INT_STS_1_OFFSET :
 			((channel == THC_RXDMA2) ? THC_M_PRT_READ_DMA_INT_STS_2_OFFSET :
@@ -685,6 +744,21 @@ static int thc_dma_read(struct thc_device *dev,
 	u8 read_ptr, write_ptr, prd_table_index;
 	int status;
 
+	/* The caller may look at this when nothing was read. */
+	*read_len = 0;
+
+	guard(mutex)(&dev->dma_ctx->prd_lock);
+
+	/*
+	 * Nothing in the ring is ours until the engine is started: after a
+	 * reset the pointers alone say nothing about what was written.
+	 */
+	if (!READ_ONCE(read_config->is_started)) {
+		if (read_finished)
+			*read_finished = 1;
+		return 0;
+	}
+
 	if (!is_dma_buf_empty(dev, read_config, &read_ptr, &write_ptr)) {
 		prd_table_index = write_ptr & THC_POINTER_MASK;
 
@@ -765,10 +839,15 @@ static int thc_swdma_read_start(struct thc_device *dev, void *write_buff,
 	if (ret)
 		return ret;
 
-	if (thc_wait_for_dma_pause(dev, THC_RXDMA1) || thc_wait_for_dma_pause(dev, THC_RXDMA2))
+	if (thc_wait_for_dma_pause(dev, THC_RXDMA1) ||
+	    thc_wait_for_dma_pause(dev, THC_RXDMA2) ||
+	    thc_wait_for_dma_pause(dev, THC_SWDMA))
 		return -EIO;
 
 	thc_reset_dma_settings(dev);
+
+	/* A transfer that timed out left its frame length in the entry. */
+	thc_copy_sgls_to_prd(dev, &dev->dma_ctx->dma_config[THC_SWDMA]);
 
 	/*
 	 * Max input size control feature is only available for RxDMA, it must keep disabled
@@ -853,6 +932,8 @@ static int thc_swdma_read_completion(struct thc_device *dev)
 	}
 
 	thc_reset_dma_settings(dev);
+
+	thc_rebuild_rx_prd(dev);
 
 	dma_set_start_bit(dev, &dev->dma_ctx->dma_config[THC_RXDMA2]);
 
