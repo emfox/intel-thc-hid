@@ -152,6 +152,61 @@ static void thc_ipts_remove(struct pci_dev *pci)
 	pci_clear_master(pci);
 }
 
+static int thc_ipts_suspend(struct device *dev)
+{
+	struct thc_ipts *idev = dev_get_drvdata(dev);
+
+	thc_ipts_port_stop(idev);
+
+	return 0;
+}
+
+static int thc_ipts_resume(struct device *dev)
+{
+	struct thc_ipts *idev = dev_get_drvdata(dev);
+	int ret;
+
+	/*
+	 * A restore can bring the global enable back with it, as firmware
+	 * leaves it at probe. The line is shared and level triggered, and the
+	 * handler has nothing to mask it with until the engines are up, so
+	 * mask it here as probe does.
+	 */
+	thc_interrupt_enable(idev->thc, false);
+
+	ret = thc_ipts_port_start(idev);
+	if (ret)
+		thc_ipts_port_stop(idev);
+
+	return ret;
+}
+
+/*
+ * The line is enabled again before the regular resume callbacks run, and the
+ * port is still down then: mask it as early as the configuration space is
+ * back, or a level left asserted by firmware burns the shared line down to a
+ * disabled interrupt.
+ */
+static int thc_ipts_resume_noirq(struct device *dev)
+{
+	struct thc_ipts *idev = dev_get_drvdata(dev);
+
+	thc_interrupt_enable(idev->thc, false);
+
+	return 0;
+}
+
+static const struct dev_pm_ops thc_ipts_pm_ops = {
+	.suspend	= thc_ipts_suspend,
+	.resume		= thc_ipts_resume,
+	.freeze		= thc_ipts_suspend,
+	.thaw		= thc_ipts_resume,
+	.poweroff	= thc_ipts_suspend,
+	.restore	= thc_ipts_resume,
+	.resume_noirq	= thc_ipts_resume_noirq,
+	.restore_noirq	= thc_ipts_resume_noirq,
+};
+
 static void thc_ipts_shutdown(struct pci_dev *pci)
 {
 	struct thc_ipts *idev = pci_get_drvdata(pci);
@@ -166,6 +221,7 @@ static struct pci_driver thc_ipts_driver = {
 	.probe		= thc_ipts_probe,
 	.remove		= thc_ipts_remove,
 	.shutdown	= thc_ipts_shutdown,
+	.driver.pm	= pm_sleep_ptr(&thc_ipts_pm_ops),
 	/* Bring-up waits for the controller, up to a few seconds. */
 	.driver.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 };
