@@ -331,6 +331,9 @@ static irqreturn_t quickspi_irq_thread_handler(int irq, void *dev_id)
 				goto end;
 			}
 
+			if (!input_len)
+				continue;
+
 			quickspi_handle_input_data(qsdev, input_len);
 		}
 	}
