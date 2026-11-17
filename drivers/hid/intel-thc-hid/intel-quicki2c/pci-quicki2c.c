@@ -298,6 +298,9 @@ static int handle_input_report(struct quicki2c_device *qcdev)
 		if (ret)
 			return ret;
 
+		if (!report_len)
+			continue;
+
 		if (!pkt->len) {
 			if (qcdev->state == QUICKI2C_RESETING) {
 				qcdev->reset_ack = true;
