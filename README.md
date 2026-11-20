@@ -9,18 +9,23 @@ what gets sent.
 
 | branch | what it is |
 |---|---|
-| `main` | the upstream files as of Linux 7.4-rc3 (`aebb72744`), plus a commit with this README |
+| `main` | every series that is in use, applied in order: `core-b`, `core-a`, `ipts` |
+| `base` | the upstream files as of Linux 7.4-rc3 (`aebb72744`), nothing applied |
 | `core-b` | DMA lifetime series, latest revision (5 commits) |
 | `core-a` | PRD tables under a drain, latest revision (2 commits) |
 | `rawlock` | raw spinlocks for the THC registers (1 commit) |
 | `ipts` | the IPTS port support (5 commits) |
 | `stack` | `core-b` + `core-a` on one line, as they have to be applied |
 
-`core-a`, `core-b`, `rawlock` and `ipts` each branch off the import commit
-(`main~1`) independently: the series touch disjoint files, so every one of
-them applies to the baseline on its own. `stack` exists because the IPTS
-series is written against a tree that already has both core fixes in it,
-even though its own hunks do not overlap with theirs.
+`core-a`, `core-b`, `rawlock` and `ipts` each branch off `base`
+independently: the series touch disjoint files, so every one of them applies
+to the baseline on its own. `stack` exists because the IPTS series is written
+against a tree that already has both core fixes in it, even though its own
+hunks do not overlap with theirs.
+
+`main` is `stack` with the IPTS patches on top, so its IPTS code is identical
+to what the `ipts` branch and `ipts-v10` carry; it is the tree to build.
+`rawlock` is a separate proposal and is not part of it.
 
 ## Tags
 
@@ -41,13 +46,47 @@ is the delta that v10 asks reviewers to look at again.
 
 ## Producing a series
 
-    git format-patch main..ipts          # the five IPTS patches
-    git format-patch main..core-b        # the five DMA lifetime patches
-    git format-patch main..core-a        # the two PRD patches on their own
+    git format-patch base..ipts          # the five IPTS patches
+    git format-patch base..core-b        # the five DMA lifetime patches
+    git format-patch base..core-a        # the two PRD patches on their own
     git format-patch core-b..stack       # the two PRD patches as stacked
 
 The `--base=` trailer records which commit the series was made against;
-pass `--base=main` so that it points at the Linux 7.4-rc3 import.
+pass `--base=base` so that it points at the Linux 7.4-rc3 import.
+
+## Building the modules
+
+Only this directory is carried, so building needs a full kernel source tree
+for everything else:
+
+    tools/build.sh                # builds main
+    tools/build.sh ipts           # or any other branch or tag
+
+`KERNEL` defaults to `~/Debian/kbuild/linux-7.4-rc2`, `OUT` to `out/`, and
+`JOBS` to `nproc`. The ref is exported into a scratch copy and built as an
+external module, so the kernel tree is never written to. The four modules
+land in `out/`:
+
+    intel-thc.ko  intel-quickspi.ko  intel-quicki2c.ko  intel-ipts.ko
+
+The four config symbols are passed on the make command line because the
+in-tree Makefile selects its objects with `obj-$(CONFIG_...)`; that is all it
+takes to build this directory out of tree, and nothing has to be copied into
+the kernel.
+
+To load them:
+
+    tools/build.sh -i             # needs root; refuses if the release is not the running one
+    modprobe intel-ipts
+
+Two things to remember:
+
+* `CONFIG_MODVERSIONS` is off in the kernels this is tested on, so symbols are
+  matched by name only. All four modules have to come from the same build, or
+  they load and then use the wrong structure offsets.
+* `intel-quickspi` and `intel-quicki2c` have no PCI ID for TGL, so on a TGL
+  machine only `intel-ipts` binds; their patches can only be reviewed there,
+  not run.
 
 ## Rebuilding
 
@@ -55,7 +94,7 @@ pass `--base=main` so that it points at the Linux 7.4-rc3 import.
 files and retags it. It expects the series directories to be where the
 kernel work area keeps them; override with `IPTS=` and `CORE=`.
 
-`stack` is not rebuilt by that script: it is `core-b` plus
+`stack` and `main` are not rebuilt by that script: `stack` is `core-b` plus
 `git cherry-pick core-a~2..core-a`, and three hunks in
 `intel-thc/intel-thc-dma.c` need a hand every time, because both series
 touch `thc_dma_unconfigure()`, the stop path inside
@@ -70,5 +109,5 @@ touch `thc_dma_unconfigure()`, the stop path inside
 * `thc_swdma_read_start()`: the three-argument `thc_wait_for_dma_pause()`
   from `core-b` plus the `THC_SWDMA` channel that `core-a` added.
 
-`tools/compile-stack.sh` builds that branch against the kernel tree the
-out-of-tree module uses, then restores the tree.
+`main` is that result with `git cherry-pick base..ipts` on top, which applies
+without conflicts.
