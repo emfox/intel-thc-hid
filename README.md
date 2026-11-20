@@ -14,7 +14,7 @@ what gets sent.
 | `core-b` | DMA lifetime series, latest revision (5 commits) |
 | `core-a` | PRD tables under a drain, latest revision (2 commits) |
 | `rawlock` | raw spinlocks for the THC registers (1 commit) |
-| `ipts` | the IPTS port support (5 commits) |
+| `ipts` | the IPTS port support (6 commits: one in the core, five in the new directory) |
 | `stack` | `core-b` + `core-a` on one line, as they have to be applied |
 
 `core-a`, `core-b`, `rawlock` and `ipts` each branch off `base`
@@ -26,6 +26,11 @@ hunks do not overlap with theirs.
 `main` is `stack` with the IPTS patches on top, so its IPTS code is identical
 to what the `ipts` branch and `ipts-v10` carry; it is the tree to build.
 `rawlock` is a separate proposal and is not part of it.
+
+The first IPTS commit is in the core rather than in the new directory: it adds
+the port calls the backend needs, and drops two warnings from
+`thc_interrupt_quiesce()`. That is why `ipts` is no longer purely additive, and
+why stacking it on `stack` takes one hand merge (see [Rebuilding](#rebuilding)).
 
 ## Tags
 
@@ -46,7 +51,7 @@ is the delta that v10 asks reviewers to look at again.
 
 ## Producing a series
 
-    git format-patch base..ipts          # the five IPTS patches
+    git format-patch base..ipts          # the six IPTS patches
     git format-patch base..core-b        # the five DMA lifetime patches
     git format-patch base..core-a        # the two PRD patches on their own
     git format-patch core-b..stack       # the two PRD patches as stacked
@@ -109,5 +114,7 @@ touch `thc_dma_unconfigure()`, the stop path inside
 * `thc_swdma_read_start()`: the three-argument `thc_wait_for_dma_pause()`
   from `core-b` plus the `THC_SWDMA` channel that `core-a` added.
 
-`main` is that result with `git cherry-pick base..ipts` on top, which applies
-without conflicts.
+`main` is that result with `git cherry-pick base..ipts` on top. One hunk needs
+a hand: the slow SPI gears that `core-a` adds and the port calls that `ipts`
+adds are inserted at the same place, just after `thc_port_select()`. Keep both,
+gears first.
