@@ -134,7 +134,11 @@ void thc_change_ltr_mode(struct thc_device *dev, u32 ltr_mode);
 void thc_ltr_unconfig(struct thc_device *dev);
 u32 thc_int_cause_read(struct thc_device *dev);
 int thc_interrupt_handler(struct thc_device *dev);
+int thc_port_reset_hold(struct thc_device *dev);
+int thc_port_reset_release(struct thc_device *dev);
 int thc_port_select(struct thc_device *dev, enum thc_port_type port_type);
+int thc_port_supported(struct thc_device *dev, bool *supported);
+u32 thc_spi_hz_from_div(u8 div, bool div8);
 int thc_spi_read_config(struct thc_device *dev, u32 spi_freq_val,
 			u32 io_mode, u32 opcode, u32 spi_rd_mps);
 int thc_spi_write_config(struct thc_device *dev, u32 spi_freq_val,

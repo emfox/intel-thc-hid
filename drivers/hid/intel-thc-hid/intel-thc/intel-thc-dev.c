@@ -642,16 +642,13 @@ int thc_interrupt_quiesce(const struct thc_device *dev, bool int_quiesce)
 	u32 ctrl;
 	int ret;
 
+	/* Every bring-up and teardown path calls this, and a port that is
+	 * already in the state that was asked for is the normal case there:
+	 * nothing to write, nothing to wait for, nothing to report.
+	 */
 	regmap_read(dev->thc_regmap, THC_M_PRT_CONTROL_OFFSET, &ctrl);
-	if (!(ctrl & THC_M_PRT_CONTROL_THC_DEVINT_QUIESCE_EN) && !int_quiesce) {
-		dev_warn(dev->dev, "THC interrupt already unquiesce\n");
+	if (!!(ctrl & THC_M_PRT_CONTROL_THC_DEVINT_QUIESCE_EN) == int_quiesce)
 		return 0;
-	}
-
-	if ((ctrl & THC_M_PRT_CONTROL_THC_DEVINT_QUIESCE_EN) && int_quiesce) {
-		dev_warn(dev->dev, "THC interrupt already quiesce\n");
-		return 0;
-	}
 
 	/* Quiesce device interrupt - Set quiesce bit and waiting for THC HW to ACK */
 	if (int_quiesce)
@@ -1117,6 +1114,67 @@ EXPORT_SYMBOL_NS_GPL(thc_port_select, "INTEL_THC");
 #define THC_SPI_FREQUENCY_3M1	3125000
 #define THC_SPI_FREQUENCY_3M9	3906250
 #define THC_SPI_FREQUENCY_5M2	5208333
+
+/**
+ * thc_port_supported - Tell whether the port has a touch device interface
+ *
+ * @dev: the pointer of THC private device context
+ * @supported: set to whether the port can drive a device at all
+ *
+ * Reads the capability bit of the port control register. A port that is not
+ * supported answers nothing on the bus, so this is worth asking before the
+ * port is brought up.
+ *
+ * Return: 0 on success, other error codes on failed
+ */
+int thc_port_supported(struct thc_device *dev, bool *supported)
+{
+	u32 ctrl;
+	int ret;
+
+	ret = regmap_read(dev->thc_regmap, THC_M_PRT_CONTROL_OFFSET, &ctrl);
+	if (ret)
+		return ret;
+
+	*supported = ctrl & THC_M_PRT_CONTROL_PORT_SUPPORTED;
+
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(thc_port_supported, "INTEL_THC");
+
+/**
+ * thc_port_reset_release - Take the port out of reset
+ *
+ * @dev: the pointer of THC private device context
+ *
+ * The reset bit of the port control register is the reset request and reads
+ * one when the port is out of reset, so the bit is written and never
+ * read-modify-written: the port has to be told either way.
+ *
+ * Return: 0 on success, other error codes on failed
+ */
+int thc_port_reset_release(struct thc_device *dev)
+{
+	return regmap_write_bits(dev->thc_regmap, THC_M_PRT_CONTROL_OFFSET,
+				 THC_M_PRT_CONTROL_DEVRST,
+				 THC_M_PRT_CONTROL_DEVRST);
+}
+EXPORT_SYMBOL_NS_GPL(thc_port_reset_release, "INTEL_THC");
+
+/**
+ * thc_port_reset_hold - Put the port into reset
+ *
+ * @dev: the pointer of THC private device context
+ *
+ * Return: 0 on success, other error codes on failed
+ */
+int thc_port_reset_hold(struct thc_device *dev)
+{
+	return regmap_write_bits(dev->thc_regmap, THC_M_PRT_CONTROL_OFFSET,
+				 THC_M_PRT_CONTROL_DEVRST, 0);
+}
+EXPORT_SYMBOL_NS_GPL(thc_port_reset_hold, "INTEL_THC");
+
 #define THC_SPI_FREQUENCY_7M	7812500
 #define THC_SPI_FREQUENCY_10M	10416700
 #define THC_SPI_FREQUENCY_15M	15625000
@@ -1129,6 +1187,9 @@ EXPORT_SYMBOL_NS_GPL(thc_port_select, "INTEL_THC");
 #define THC_SPI_FREQUENCY_50M	50000000
 
 #define THC_SPI_LOW_FREQUENCY	THC_SPI_FREQUENCY_17M
+
+/* Every gear above is the base clock divided by an integer. */
+#define THC_SPI_BASE_HZ		125000000
 
 static u8 thc_get_spi_freq_div_val(struct thc_device *dev, u32 spi_freq_val)
 {
@@ -1206,6 +1267,37 @@ static bool thc_spi_needs_half_div(u8 freq_div, u32 spi_freq_val,
 	return freq_div == THC_SPI_FRQ_DIV_1 &&
 	       spi_freq_val < THC_SPI_FREQUENCY_15M;
 }
+
+/**
+ * thc_spi_hz_from_div - Turn a base clock divisor into a bus frequency
+ *
+ * @div: divisor, zero when the device did not provide one
+ * @div8: divide the result by eight as well
+ *
+ * A device that describes its bus timing as a divisor has to come back
+ * through here rather than through a copy of the base clock of its own: the
+ * gears thc_spi_read_config() programs are fractions of that clock, and a
+ * frequency computed from another base lands on the wrong one.
+ *
+ * Return: the frequency in Hz, or 0 for a divisor of zero
+ */
+u32 thc_spi_hz_from_div(u8 div, bool div8)
+{
+	u32 hz;
+
+	if (!div)
+		return 0;
+
+	hz = THC_SPI_BASE_HZ / div;
+	if (div8)
+		hz /= 8;
+
+	/* Geared frequencies are compared rounded to 100 Hz: round the same
+	 * way here, or divisor 3 lands just below the 41 MHz gear.
+	 */
+	return DIV_ROUND_CLOSEST(hz, 100) * 100;
+}
+EXPORT_SYMBOL_NS_GPL(thc_spi_hz_from_div, "INTEL_THC");
 
 /**
  * thc_spi_read_config - Configure SPI bus read attributes
